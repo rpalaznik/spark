@@ -51,71 +51,73 @@ private[mesos] class MesosClusterSchedulerSource(scheduler: MesosClusterSchedule
   override val sourceName: String = "mesos_cluster"
   override val metricRegistry: MetricRegistry = new MetricRegistry
 
+  private val driverMetricsName = "drivers"
+
   // PULL METRICS:
   // These gauge metrics are periodically polled/pulled by the metrics system
 
-  metricRegistry.register(MetricRegistry.name("driver", "waiting"), new Gauge[Int] {
+  metricRegistry.register(MetricRegistry.name(driverMetricsName, "waiting"), new Gauge[Int] {
     override def getValue: Int = scheduler.getQueuedDriversSize
   })
 
-  metricRegistry.register(MetricRegistry.name("driver", "launched"), new Gauge[Int] {
+  metricRegistry.register(MetricRegistry.name(driverMetricsName, "launched"), new Gauge[Int] {
     override def getValue: Int = scheduler.getLaunchedDriversSize
   })
 
-  metricRegistry.register(MetricRegistry.name("driver", "retry"), new Gauge[Int] {
+  metricRegistry.register(MetricRegistry.name(driverMetricsName, "retry"), new Gauge[Int] {
     override def getValue: Int = scheduler.getPendingRetryDriversSize
   })
 
-  metricRegistry.register(MetricRegistry.name("driver", "finished"), new Gauge[Int] {
+  metricRegistry.register(MetricRegistry.name(driverMetricsName, "finished"), new Gauge[Int] {
     override def getValue: Int = scheduler.getFinishedDriversSize
   })
 
   // PUSH METRICS:
   // These metrics are updated directly as events occur
 
-  private val queuedCounter = metricRegistry.counter(MetricRegistry.name("driver", "waiting_count"))
+  private val queuedCounter = metricRegistry.counter(MetricRegistry.name(driverMetricsName, "waiting_count"))
   private val launchedCounter =
-    metricRegistry.counter(MetricRegistry.name("driver", "launched_count"))
-  private val retryCounter = metricRegistry.counter(MetricRegistry.name("driver", "retry_count"))
+    metricRegistry.counter(MetricRegistry.name(driverMetricsName, "launched_count"))
+  private val retryCounter = metricRegistry.counter(MetricRegistry.name(driverMetricsName, "retry_count"))
   private val exceptionCounter =
-    metricRegistry.counter(MetricRegistry.name("driver", "exception_count"))
+    metricRegistry.counter(MetricRegistry.name(driverMetricsName, "exception_count"))
   private val finishedCounter =
-    metricRegistry.counter(MetricRegistry.name("driver", "finished_count"))
+    metricRegistry.counter(MetricRegistry.name(driverMetricsName, "finished_count"))
 
   // Same as finishedCounter above, except grouped by MesosTaskState.
   private val finishedMesosStateCounters = MesosTaskState.values
     // Avoid registering 'finished' metrics for states that aren't considered finished:
     .filter(state => TaskState.isFinished(mesosToTaskState(state)))
     .map(state => (state, metricRegistry.counter(
-      MetricRegistry.name("driver", "finished_count_mesos_state", state.name.toLowerCase))))
+      MetricRegistry.name(driverMetricsName, "finished_count_mesos_state", state.name.toLowerCase))))
     .toMap
   private val finishedMesosUnknownStateCounter =
-    metricRegistry.counter(MetricRegistry.name("driver", "finished_count_mesos_state", "UNKNOWN"))
+    metricRegistry.counter(MetricRegistry.name(driverMetricsName, "finished_count_mesos_state", "UNKNOWN"))
 
   // Duration from submission to FIRST launch.
   // This omits retries since those would exaggerate the time since original submission.
   private val submitToFirstLaunch =
-    metricRegistry.timer(MetricRegistry.name("driver", "submit_to_first_launch"))
+    metricRegistry.timer(MetricRegistry.name(driverMetricsName, "submit_to_first_launch"))
   // Duration from initial submission to an exception.
   private val submitToException =
-    metricRegistry.timer(MetricRegistry.name("driver", "submit_to_exception"))
+    metricRegistry.timer(MetricRegistry.name(driverMetricsName, "submit_to_exception"))
 
   // Duration from (most recent) launch to a retry.
-  private val launchToRetry = metricRegistry.timer(MetricRegistry.name("driver", "launch_to_retry"))
+  private val launchToRetry = metricRegistry.timer(MetricRegistry.name(driverMetricsName, "launch_to_retry"))
 
   // Duration from initial submission to finished.
   private val submitToFinish =
-    metricRegistry.timer(MetricRegistry.name("driver", "submit_to_finish"))
+    metricRegistry.timer(MetricRegistry.name(driverMetricsName, "submit_to_finish"))
   // Duration from (most recent) launch to finished.
   private val launchToFinish =
-    metricRegistry.timer(MetricRegistry.name("driver", "launch_to_finish"))
+    metricRegistry.timer(MetricRegistry.name(driverMetricsName, "launch_to_finish"))
 
   // Same as submitToFinish and launchToFinish above, except grouped by Spark TaskState.
   class FinishStateTimers(state: String) {
     val submitToFinish =
-      metricRegistry.timer(MetricRegistry.name("driver", "submit_to_finish_state", state))
+      metricRegistry.timer(MetricRegistry.name(driverMetricsName, "submit_to_finish_state", state))
     val launchToFinish =
-      metricRegistry.timer(MetricRegistry.name("driver", "launch_to_finish_state", state))
+      metricRegistry.timer(MetricRegistry.name(driverMetricsName, "launch_to_finish_state", state))
   }
   private val finishSparkStateTimers = HashMap.empty[TaskState.TaskState, FinishStateTimers]
   for (state <- TaskState.values) {
@@ -125,12 +127,12 @@ private[mesos] class MesosClusterSchedulerSource(scheduler: MesosClusterSchedule
     }
   }
   private val submitToFinishUnknownState = metricRegistry.timer(
-    MetricRegistry.name("driver", "submit_to_finish_state", "UNKNOWN"))
+    MetricRegistry.name(driverMetricsName, "submit_to_finish_state", "UNKNOWN"))
   private val launchToFinishUnknownState = metricRegistry.timer(
-    MetricRegistry.name("driver", "launch_to_finish_state", "UNKNOWN"))
+    MetricRegistry.name(driverMetricsName, "launch_to_finish_state", "UNKNOWN"))
 
   // Histogram of retry counts at retry scheduling
-  private val retryCount = metricRegistry.histogram(MetricRegistry.name("driver", "retry_counts"))
+  private val retryCount = metricRegistry.histogram(MetricRegistry.name(driverMetricsName, "retry_counts"))
 
   // Records when a submission initially enters the launch queue.
   def recordQueuedDriver(): Unit = queuedCounter.inc
