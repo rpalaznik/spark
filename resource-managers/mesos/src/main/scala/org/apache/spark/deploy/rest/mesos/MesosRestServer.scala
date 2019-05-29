@@ -27,7 +27,7 @@ import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf}
 import org.apache.spark.deploy.Command
 import org.apache.spark.deploy.mesos.MesosDriverDescription
 import org.apache.spark.deploy.rest._
-import org.apache.spark.scheduler.cluster.mesos.MesosClusterScheduler
+import org.apache.spark.scheduler.cluster.mesos.{MesosClusterScheduler, MesosProtoUtils}
 import org.apache.spark.util.Utils
 
 /**
@@ -70,7 +70,7 @@ private[mesos] class MesosSubmitRequestServlet(
   // These defaults copied from YARN
   private val MEMORY_OVERHEAD_FACTOR = 0.10
   private val MEMORY_OVERHEAD_MIN = 384
-  
+
   /**
    * Build a driver description from the fields specified in the submit request.
    *
@@ -107,6 +107,9 @@ private[mesos] class MesosSubmitRequestServlet(
     val driverCores = sparkProperties.get("spark.driver.cores")
     val name = request.sparkProperties.getOrElse("spark.app.name", mainClass)
 
+    validateLabelFormat(sparkProperties, "spark.mesos.network.labels", "spark.mesos.task.labels",
+      "spark.mesos.driver.labels")
+
     // Construct driver description
     val defaultConf = this.conf.getAllWithPrefix("spark.mesos.dispatcher.driverDefault.").toMap
     val driverConf = new SparkConf(false)
@@ -129,7 +132,7 @@ private[mesos] class MesosSubmitRequestServlet(
     val submissionId = newDriverId(submitDate)
 
     new MesosDriverDescription(
-      name, appResource, actualDriverMemory + actualDriverMemoryOverhead, actualDriverCores, 
+      name, appResource, actualDriverMemory + actualDriverMemoryOverhead, actualDriverCores,
       actualSuperviseDriver, command, driverConf.getAll.toMap, submissionId, submitDate)
   }
 
@@ -153,6 +156,20 @@ private[mesos] class MesosSubmitRequestServlet(
         handleError(s"Received message of unexpected type ${unexpected.messageType}.")
     }
   }
+
+  private[mesos] def validateLabelFormat(properties: Map[String, String]
+                                       , propertyNames: String*): Unit = {
+    propertyNames.foreach { name =>
+      properties.get(name) foreach { label =>
+        try {
+          MesosProtoUtils.mesosLabels(label)
+        } catch {
+          case _ => throw new SubmitRestProtocolException("Malformed label in " +
+            f"${name}: ${label}")
+        }
+      }
+    }
+  }
 }
 
 private[mesos] class MesosKillRequestServlet(scheduler: MesosClusterScheduler, conf: SparkConf)
@@ -172,3 +189,5 @@ private[mesos] class MesosStatusRequestServlet(scheduler: MesosClusterScheduler,
     d
   }
 }
+
+
