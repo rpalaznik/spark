@@ -26,7 +26,7 @@ import javax.servlet.http.HttpServletResponse
 import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf}
 import org.apache.spark.deploy.Command
 import org.apache.spark.deploy.mesos.MesosDriverDescription
-import org.apache.spark.deploy.rest._
+import org.apache.spark.deploy.rest.{SubmitRestProtocolException, _}
 import org.apache.spark.scheduler.cluster.mesos.{MesosClusterScheduler, MesosProtoUtils}
 import org.apache.spark.util.Utils
 
@@ -142,15 +142,21 @@ private[mesos] class MesosSubmitRequestServlet(
       responseServlet: HttpServletResponse): SubmitRestProtocolResponse = {
     requestMessage match {
       case submitRequest: CreateSubmissionRequest =>
-        val driverDescription = buildDriverDescription(submitRequest)
-        val s = scheduler.submitDriver(driverDescription)
-        s.serverSparkVersion = sparkVersion
-        val unknownFields = findUnknownFields(requestMessageJson, requestMessage)
-        if (unknownFields.nonEmpty) {
-          // If there are fields that the server does not know about, warn the client
-          s.unknownFields = unknownFields
+        try {
+          val driverDescription = buildDriverDescription(submitRequest)
+          val s = scheduler.submitDriver(driverDescription)
+          s.serverSparkVersion = sparkVersion
+          val unknownFields = findUnknownFields(requestMessageJson, requestMessage)
+          if (unknownFields.nonEmpty) {
+            // If there are fields that the server does not know about, warn the client
+            s.unknownFields = unknownFields
+          }
+          s
+        } catch {
+          case ex: SubmitRestProtocolException =>
+            responseServlet.setStatus(HttpServletResponse.SC_BAD_REQUEST)
+            handleError(s"Bad request: ${ex.getMessage}")
         }
-        s
       case unexpected =>
         responseServlet.setStatus(HttpServletResponse.SC_BAD_REQUEST)
         handleError(s"Received message of unexpected type ${unexpected.messageType}.")
