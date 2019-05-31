@@ -171,7 +171,7 @@ private[mesos] class MesosSubmitRequestServlet(
           MesosProtoUtils.mesosLabels(label)
         } catch {
           case _ => throw new SubmitRestProtocolException("Malformed label in " +
-            f"${name}: ${label}")
+            f"${name}: ${label}. Valid label format: ${name}=key1:value1,key2:value2")
         }
       }
     }
