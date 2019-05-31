@@ -23,7 +23,7 @@ import java.util.{Date, Locale}
 import java.util.concurrent.atomic.AtomicLong
 import javax.servlet.http.HttpServletResponse
 
-import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf}
+import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf, SparkException}
 import org.apache.spark.deploy.Command
 import org.apache.spark.deploy.mesos.MesosDriverDescription
 import org.apache.spark.deploy.rest.{SubmitRestProtocolException, _}
@@ -169,7 +169,7 @@ private[mesos] class MesosSubmitRequestServlet(
         try {
           MesosProtoUtils.mesosLabels(label)
         } catch {
-          case _ => throw new SubmitRestProtocolException("Malformed label in " +
+          case _ : SparkException => throw new SubmitRestProtocolException("Malformed label in " +
             s"${name}: ${label}. Valid label format: ${name}=key1:value1,key2:value2")
         }
       }
