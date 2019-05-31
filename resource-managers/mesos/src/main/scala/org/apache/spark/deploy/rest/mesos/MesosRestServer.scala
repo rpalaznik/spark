@@ -163,15 +163,14 @@ private[mesos] class MesosSubmitRequestServlet(
   }
 
   private[mesos] def validateLabelFormat(properties: Map[String, String]): Unit = {
-    val propertyNames = List("spark.mesos.network.labels", "spark.mesos.task.labels",
-      "spark.mesos.driver.labels");
-    propertyNames.foreach { name =>
+    List("spark.mesos.network.labels", "spark.mesos.task.labels", "spark.mesos.driver.labels")
+      .foreach { name =>
       properties.get(name) foreach { label =>
         try {
           MesosProtoUtils.mesosLabels(label)
         } catch {
           case _ => throw new SubmitRestProtocolException("Malformed label in " +
-            f"${name}: ${label}. Valid label format: ${name}=key1:value1,key2:value2")
+            s"${name}: ${label}. Valid label format: ${name}=key1:value1,key2:value2")
         }
       }
     }
