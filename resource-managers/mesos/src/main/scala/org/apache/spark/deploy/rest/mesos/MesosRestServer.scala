@@ -107,7 +107,7 @@ private[mesos] class MesosSubmitRequestServlet(
     val driverCores = sparkProperties.get("spark.driver.cores")
     val name = request.sparkProperties.getOrElse("spark.app.name", mainClass)
 
-    validateLabelFormat(sparkProperties)
+    validateLabelsFormat(sparkProperties)
 
     // Construct driver description
     val defaultConf = this.conf.getAllWithPrefix("spark.mesos.dispatcher.driverDefault.").toMap
@@ -162,7 +162,7 @@ private[mesos] class MesosSubmitRequestServlet(
     }
   }
 
-  private[mesos] def validateLabelFormat(properties: Map[String, String]): Unit = {
+  private[mesos] def validateLabelsFormat(properties: Map[String, String]): Unit = {
     List("spark.mesos.network.labels", "spark.mesos.task.labels", "spark.mesos.driver.labels")
       .foreach { name =>
       properties.get(name) foreach { label =>
