@@ -58,6 +58,12 @@ class MesosClusterSchedulerSuite extends SparkFunSuite with LocalSparkContext wi
   }
 
   private def testDriverDescription(submissionId: String): MesosDriverDescription = {
+    testDriverDescription(submissionId, Map[String, String]())
+  }
+
+  private def testDriverDescription(
+      submissionId: String,
+      schedulerProps: Map[String, String]): MesosDriverDescription = {
     new MesosDriverDescription(
       "d1",
       "jar",
@@ -65,7 +71,7 @@ class MesosClusterSchedulerSuite extends SparkFunSuite with LocalSparkContext wi
       1,
       true,
       command,
-      Map[String, String](),
+      schedulerProps,
       submissionId,
       new Date())
   }
@@ -197,6 +203,46 @@ class MesosClusterSchedulerSuite extends SparkFunSuite with LocalSparkContext wi
     List(" ", "'", "<", ">", "&", "|", "?", "*", ";", "!", "#", "(", ")").foreach(char => {
       assert(escape(s"onlywrap${char}this") === wrapped(s"onlywrap${char}this"))
     })
+  }
+
+  test("escapes spark.app.name correctly") {
+    setScheduler()
+
+    val driverDesc = testDriverDescription("s1", Map[String, String](
+      "spark.app.name" -> "AnApp With $pecialChars.py",
+      "spark.mesos.executor.home" -> "test"
+    ))
+
+    val cmdString = scheduler.getDriverCommandValue(driverDesc)
+    assert(cmdString.contains("AnApp With \\$pecialChars.py"))
+  }
+
+  test("escapes extraJavaOptions correctly") {
+    setScheduler()
+
+    val driverDesc = testDriverDescription("s1", Map[String, String](
+      "spark.app.name" -> "app.py",
+      "spark.mesos.executor.home" -> "test",
+      "spark.driver.extraJavaOptions" -> "-DparamA=\"val1 val2\" -Dpath=$PATH"
+    ))
+
+    val cmdString = scheduler.getDriverCommandValue(driverDesc)
+    assert(cmdString.contains(
+      "spark.driver.extraJavaOptions=\"-DparamA=\\\"val1 val2\\\" -Dpath=\\$PATH"))
+  }
+
+  test("does not escape $MESOS_SANDBOX for --py-files when using a docker image") {
+    setScheduler()
+
+    val driverDesc = testDriverDescription("s1", Map[String, String](
+      "spark.app.name" -> "app.py",
+      "spark.mesos.executor.docker.image" -> "test/spark:01",
+      "spark.submit.pyFiles" -> "http://site.com/extraPythonFile.py"
+    ))
+
+    val cmdString = scheduler.getDriverCommandValue(driverDesc)
+    assert(!cmdString.contains("\\$MESOS_SANDBOX/extraPythonFile.py"))
+    assert(cmdString.contains("$MESOS_SANDBOX/extraPythonFile.py"))
   }
 
   test("supports spark.mesos.driverEnv.*") {
@@ -421,6 +467,84 @@ class MesosClusterSchedulerSuite extends SparkFunSuite with LocalSparkContext wi
     assert(state.pendingRetryDrivers.isEmpty)
     assert(state.launchedDrivers.isEmpty)
     assert(state.finishedDrivers.size == 1)
+  }
+
+  test("does not restart outdated supervised drivers") {
+    // Covers scenario where:
+    // - agent goes down
+    // - supervised job is relaunched on another agent
+    // - first agent re-registers and sends status update: TASK_FAILED
+    // - job should NOT be relaunched again
+    val conf = new SparkConf()
+    conf.setMaster("mesos://localhost:5050")
+    conf.setAppName("SparkMesosDriverRetries")
+    setScheduler(conf.getAll.toMap)
+
+    val mem = 1000
+    val cpu = 1
+    val offers = List(
+      Utils.createOffer("o1", "s1", mem, cpu, None),
+      Utils.createOffer("o2", "s2", mem, cpu, None),
+      Utils.createOffer("o3", "s1", mem, cpu, None))
+
+    val response = scheduler.submitDriver(
+      new MesosDriverDescription("d1", "jar", 100, 1, true, command,
+        Map(("spark.mesos.executor.home", "test"), ("spark.app.name", "test")), "sub1", new Date()))
+    assert(response.success)
+
+    // Offer a resource to launch the submitted driver
+    scheduler.resourceOffers(driver, Collections.singletonList(offers.head))
+    var state = scheduler.getSchedulerState()
+    assert(state.launchedDrivers.size == 1)
+
+    // Signal agent lost with status with TASK_LOST
+    val agent1 = SlaveID.newBuilder().setValue("s1").build()
+    var taskStatus = TaskStatus.newBuilder()
+      .setTaskId(TaskID.newBuilder().setValue(response.submissionId).build())
+      .setSlaveId(agent1)
+      .setReason(TaskStatus.Reason.REASON_SLAVE_REMOVED)
+      .setState(MesosTaskState.TASK_LOST)
+      .build()
+
+    scheduler.statusUpdate(driver, taskStatus)
+    state = scheduler.getSchedulerState()
+    assert(state.pendingRetryDrivers.size == 1)
+    assert(state.launchedDrivers.isEmpty)
+
+    // Offer new resource to retry driver on a new agent
+    Thread.sleep(1500) // sleep to cover nextRetry's default wait time of 1s
+    scheduler.resourceOffers(driver, Collections.singletonList(offers(1)))
+
+    val agent2 = SlaveID.newBuilder().setValue("s2").build()
+    taskStatus = TaskStatus.newBuilder()
+      .setTaskId(TaskID.newBuilder().setValue(response.submissionId).build())
+      .setSlaveId(agent2)
+      .setState(MesosTaskState.TASK_RUNNING)
+      .build()
+
+    scheduler.statusUpdate(driver, taskStatus)
+    state = scheduler.getSchedulerState()
+    assert(state.pendingRetryDrivers.isEmpty)
+    assert(state.launchedDrivers.size == 1)
+    assert(state.launchedDrivers.head.taskId.getValue.endsWith("-retry-1"))
+
+    // Agent1 comes back online and sends status update: TASK_FAILED
+    taskStatus = TaskStatus.newBuilder()
+      .setTaskId(TaskID.newBuilder().setValue(response.submissionId).build())
+      .setSlaveId(agent1)
+      .setState(MesosTaskState.TASK_FAILED)
+      .setMessage("Abnormal executor termination")
+      .setReason(TaskStatus.Reason.REASON_EXECUTOR_TERMINATED)
+      .build()
+
+    scheduler.statusUpdate(driver, taskStatus)
+    scheduler.resourceOffers(driver, Collections.singletonList(offers.last))
+
+    // Assert driver does not restart 2nd time
+    state = scheduler.getSchedulerState()
+    assert(state.pendingRetryDrivers.isEmpty)
+    assert(state.launchedDrivers.size == 1)
+    assert(state.launchedDrivers.head.taskId.getValue.endsWith("-retry-1"))
   }
 
   test("Declines offer with refuse seconds = 120.") {

@@ -37,7 +37,7 @@ import org.apache.spark.internal.config._
 import org.apache.spark.network.shuffle.mesos.MesosExternalShuffleClient
 import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef}
 import org.apache.spark.scheduler.TaskSchedulerImpl
-import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.{RegisterExecutor}
+import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RegisterExecutor
 import org.apache.spark.scheduler.cluster.mesos.Utils._
 
 class MesosCoarseGrainedSchedulerBackendSuite extends SparkFunSuite
@@ -177,6 +177,60 @@ class MesosCoarseGrainedSchedulerBackendSuite extends SparkFunSuite
 
     val gpus = backend.getResource(taskInfos.head.getResourcesList, "gpus")
     assert(gpus == maxGpus)
+  }
+
+
+  test("mesos acquires spark.mesos.executor.gpus number of gpus per executor") {
+    setBackend(Map("spark.mesos.gpus.max" -> "5",
+                   "spark.mesos.executor.gpus" -> "2"))
+
+    val executorMemory = backend.executorMemory(sc)
+    offerResources(List(Resources(executorMemory, 1, 5)))
+
+    val taskInfos = verifyTaskLaunched(driver, "o1")
+    assert(taskInfos.length == 1)
+
+    val gpus = backend.getResource(taskInfos.head.getResourcesList, "gpus")
+    assert(gpus == 2)
+  }
+
+
+  test("mesos declines offers that cannot satisfy spark.mesos.executor.gpus") {
+    setBackend(Map("spark.mesos.gpus.max" -> "5",
+                   "spark.mesos.executor.gpus" -> "2"))
+
+    val executorMemory = backend.executorMemory(sc)
+    offerResources(List(Resources(executorMemory, 1, 1)))
+    verifyDeclinedOffer(driver, createOfferId("o1"))
+  }
+
+
+  test("mesos declines offers where spark.mesos.gpus.max less than spark.mesos.executor.gpus") {
+    setBackend(Map("spark.mesos.gpus.max" -> "2",
+                   "spark.mesos.executor.gpus" -> "5"))
+
+    val executorMemory = backend.executorMemory(sc)
+    offerResources(List(Resources(executorMemory, 1, 5)))
+    verifyDeclinedOffer(driver, createOfferId("o1"))
+  }
+
+
+  test("mesos declines offers that exceed spark.mesos.gpus.max") {
+    setBackend(Map("spark.mesos.gpus.max" -> "5",
+                   "spark.mesos.executor.gpus" -> "2"))
+
+    val executorMemory = backend.executorMemory(sc)
+    offerResources(List(Resources(executorMemory, 1, 2),
+                        Resources(executorMemory, 1, 2),
+                        Resources(executorMemory, 1, 2)))
+
+    val taskInfos1 = verifyTaskLaunched(driver, "o1")
+    assert(backend.getResource(taskInfos1.head.getResourcesList, "gpus") == 2)
+
+    val taskInfos2 = verifyTaskLaunched(driver, "o2")
+    assert(backend.getResource(taskInfos2.head.getResourcesList, "gpus") == 2)
+
+    verifyDeclinedOffer(driver, createOfferId("o3"))
   }
 
 
@@ -404,6 +458,41 @@ class MesosCoarseGrainedSchedulerBackendSuite extends SparkFunSuite
     backend.start()
   }
 
+  test("checkpointing is enabled in created scheduled driver") {
+    val checkpointExpected = true
+    initializeSparkConf(Map(CHECKPOINT.key -> checkpointExpected.toString))
+    sc = new SparkContext(sparkConf)
+
+    val taskScheduler = mock[TaskSchedulerImpl]
+    when(taskScheduler.sc).thenReturn(sc)
+
+    val driver = mock[SchedulerDriver]
+    when(driver.start()).thenReturn(Protos.Status.DRIVER_RUNNING)
+
+    val securityManager = mock[SecurityManager]
+
+    val backend = new MesosCoarseGrainedSchedulerBackend(
+      taskScheduler, sc, "master", securityManager) {
+      override protected def createSchedulerDriver(
+          masterUrl: String,
+          scheduler: Scheduler,
+          sparkUser: String,
+          appName: String,
+          conf: SparkConf,
+          webuiUrl: Option[String] = None,
+          checkpoint: Option[Boolean] = None,
+          failoverTimeout: Option[Double] = None,
+          frameworkId: Option[String] = None): SchedulerDriver = {
+        markRegistered()
+        assert(checkpoint.isDefined)
+        assert(checkpoint.get.equals(checkpointExpected))
+        driver
+      }
+    }
+
+    backend.start()
+  }
+
   test("honors unset spark.mesos.containerizer") {
     setBackend(Map("spark.mesos.executor.docker.image" -> "test"))
 
@@ -544,6 +633,21 @@ class MesosCoarseGrainedSchedulerBackendSuite extends SparkFunSuite
     assert(launchedTasks.head.getName == "test-mesos-dynamic-alloc 0")
   }
 
+  test("mesos sets different task ids across executions") {
+    setBackend()
+    var offers = List(Resources(backend.executorMemory(sc), 1))
+    offerResources(offers)
+    val firstLaunchTaskId = verifyTaskLaunched(driver, "o1").head.getTaskId.getValue
+    sc.stop()
+
+    setBackend()
+    offers = List(Resources(backend.executorMemory(sc), 1))
+    offerResources(offers)
+    val secondLaunchTaskId = verifyTaskLaunched(driver, "o1").head.getTaskId.getValue
+
+    assert(firstLaunchTaskId != secondLaunchTaskId)
+  }
+
   test("mesos sets configurable labels on tasks") {
     val taskLabelsString = "mesos:test,label:test"
     setBackend(Map(
@@ -586,6 +690,30 @@ class MesosCoarseGrainedSchedulerBackendSuite extends SparkFunSuite
     assert(networkInfos.get(0).getLabels.getLabels(0).getValue == "val1")
     assert(networkInfos.get(0).getLabels.getLabels(1).getKey == "key2")
     assert(networkInfos.get(0).getLabels.getLabels(1).getValue == "val2")
+  }
+
+  test("scheduler backend skips '--hostname' for executor when virtual network is enabled") {
+    setBackend()
+    val (mem, cpu) = (backend.executorMemory(sc), 4)
+    val offer = createOffer("o1", "s1", mem, cpu)
+
+    assert(backend.createCommand(offer, cpu, "test").getValue.contains("--hostname"))
+    sc.stop()
+
+    setBackend(Map("spark.executor.uri" -> "hdfs://test/executor.jar"))
+    assert(backend.createCommand(offer, cpu, "test").getValue.contains("--hostname"))
+    sc.stop()
+
+    setBackend(Map("spark.mesos.network.name" -> "test"))
+    assert(!backend.createCommand(offer, cpu, "test").getValue.contains("--hostname"))
+    sc.stop()
+
+    setBackend(Map(
+      "spark.mesos.network.name" -> "test",
+      "spark.executor.uri" -> "hdfs://test/executor.jar"
+    ))
+    assert(!backend.createCommand(offer, cpu, "test").getValue.contains("--hostname"))
+    sc.stop()
   }
 
   test("supports spark.scheduler.minRegisteredResourcesRatio") {
